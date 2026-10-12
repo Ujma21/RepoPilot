@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .runs/
+# Generated Python packaging files
+*.egg-info/
