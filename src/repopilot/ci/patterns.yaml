@@ -1,0 +1,41 @@
+
+patterns:
+  - type: module_not_found
+    message: Python module or package could not be imported.
+    confidence: 0.95
+    regex: 'ModuleNotFoundError:\s*(?:No module named\s+)?[''"]?([^''"\r\n]+)'
+
+  - type: npm_missing_script
+    message: npm could not find the requested script.
+    confidence: 0.98
+    regex: 'Missing script:\s*[''"]([^''"]+)[''"]'
+
+  - type: out_of_memory
+    message: Process or job may have run out of memory.
+    confidence: 0.90
+    regex: '(?i)(?:OOMKilled|out of memory|JavaScript heap out of memory|fatal error:\s*.*heap|process was killed due to memory)'
+
+  - type: syntax_error
+    message: A syntax error was reported.
+    confidence: 0.95
+    regex: '(?i)\bSyntaxError:\s*(.+)'
+
+  - type: test_failure
+    message: A test or assertion failed.
+    confidence: 0.90
+    regex: '(?i)(?:FAILED\s+[\w./:\\-]+|AssertionError(?::\s*.*)?|Error:\s*\d+\s+test(?:s)? failed|Tests?\s+failed:)'
+
+  - type: git_pathspec
+    message: Git could not resolve the specified path or pathspec.
+    confidence: 0.97
+    regex: 'pathspec .+ did not match any file'
+
+  - type: permission_denied
+    message: An operation was denied due to insufficient permissions.
+    confidence: 0.93
+    regex: '(?i)(?:Permission denied|EACCES:\s*permission denied|Access is denied)'
+
+  - type: file_not_found
+    message: A required file or path could not be found.
+    confidence: 0.90
+    regex: '(?:FileNotFoundError:\s*.*|No such file or directory|ENOENT:\s*no such file or directory)'
