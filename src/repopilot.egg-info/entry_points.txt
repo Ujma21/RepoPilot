@@ -1,0 +1,2 @@
+[console_scripts]
+repopilot = repopilot.main:main
