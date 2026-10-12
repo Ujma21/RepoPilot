@@ -6,7 +6,14 @@ from typing import Any
 from repopilot.core.tracing import Tracer
 from repopilot.providers.base import LLMProvider
 from repopilot.safety.policies import SafetyPolicy
-from repopilot.tools.git_tools import GIT_STATUS_TOOL, execute_tool
+from repopilot.tools.git_tools import (
+    GIT_STATUS_TOOL,
+    execute_tool,
+)
+from repopilot.tools.ci_tools import (
+    FETCH_CI_LOGS_TOOL,
+    FETCH_CI_RUN_TOOL,
+)
 
 
 SYSTEM_PROMPT = """
@@ -40,7 +47,11 @@ class Agent:
             max_steps=max_steps
         )
         self.max_steps = min(max_steps, self.safety_policy.max_steps)
-        self.tools = [GIT_STATUS_TOOL]
+        self.tools = [
+             GIT_STATUS_TOOL,
+             FETCH_CI_RUN_TOOL,
+            FETCH_CI_LOGS_TOOL,
+        ]
         self.tracer: Tracer | None = None
 
     def _finish_trace(self) -> None:

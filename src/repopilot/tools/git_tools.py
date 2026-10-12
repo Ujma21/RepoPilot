@@ -2,7 +2,12 @@
 import subprocess
 from pathlib import Path
 from typing import Any
-
+from repopilot.tools.ci_tools import (
+    FETCH_CI_LOGS_TOOL,
+    FETCH_CI_RUN_TOOL,
+    fetch_ci_logs,
+    fetch_ci_run,
+)
 
 GIT_STATUS_TOOL = {
     "name": "git_status",
@@ -72,21 +77,33 @@ def git_status() -> dict[str, Any]:
         }
 
 
+
 def execute_tool(
     name: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Validate and execute an available RepoPilot tool."""
-    if name != "git_status":
+    if not isinstance(arguments, dict):
         return {
             "success": False,
-            "error": f"Unknown tool: {name}",
+            "error": "Tool arguments must be an object.",
         }
 
-    if arguments:
-        return {
-            "success": False,
-            "error": "git_status does not accept arguments.",
-        }
+    if name == "git_status":
+        if arguments:
+            return {
+                "success": False,
+                "error": "git_status does not accept arguments.",
+            }
+        return git_status()
 
-    return git_status()
+    if name == "fetch_ci_run":
+        return fetch_ci_run(arguments)
+
+    if name == "fetch_ci_logs":
+        return fetch_ci_logs(arguments)
+
+    return {
+        "success": False,
+        "error": f"Unknown tool: {name}",
+    }

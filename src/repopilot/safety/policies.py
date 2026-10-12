@@ -11,7 +11,11 @@ class SafetyPolicy:
     """Define the actions RepoPilot is allowed to perform."""
 
     allowed_tools: frozenset[str] = field(
-        default_factory=lambda: frozenset({"git_status"})
+        default_factory=lambda: frozenset({
+            "git_status",
+            "fetch_ci_run",
+            "fetch_ci_logs",
+        })
     )
     max_steps: int = DEFAULT_MAX_STEPS
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
