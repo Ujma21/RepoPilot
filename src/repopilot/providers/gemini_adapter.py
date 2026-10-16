@@ -125,6 +125,7 @@ class GeminiAdapter(LLMProvider):
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.2,
+                response_mime_type="application/json",
             ),
         )
 

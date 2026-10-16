@@ -8,6 +8,8 @@ from repopilot.providers.base import LLMProvider
 from repopilot.safety.policies import SafetyPolicy
 from repopilot.tools.git_tools import (
     GIT_STATUS_TOOL,
+    LIST_REPO_FILES_TOOL,
+    READ_REPO_FILE_TOOL,
     execute_tool,
 )
 from repopilot.tools.ci_tools import (
@@ -48,8 +50,10 @@ class Agent:
         )
         self.max_steps = min(max_steps, self.safety_policy.max_steps)
         self.tools = [
-             GIT_STATUS_TOOL,
-             FETCH_CI_RUN_TOOL,
+            GIT_STATUS_TOOL,
+            LIST_REPO_FILES_TOOL,
+            READ_REPO_FILE_TOOL,
+            FETCH_CI_RUN_TOOL,
             FETCH_CI_LOGS_TOOL,
         ]
         self.tracer: Tracer | None = None

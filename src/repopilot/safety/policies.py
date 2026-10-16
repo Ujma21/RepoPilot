@@ -13,6 +13,8 @@ class SafetyPolicy:
     allowed_tools: frozenset[str] = field(
         default_factory=lambda: frozenset({
             "git_status",
+            "list_repo_files",
+            "read_repo_file",
             "fetch_ci_run",
             "fetch_ci_logs",
         })

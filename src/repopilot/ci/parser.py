@@ -28,14 +28,23 @@ def _load_patterns(path: Path) -> list[dict[str, Any]]:
         with path.open("r", encoding="utf-8") as file:
             data = yaml.safe_load(file)
     except OSError as exc:
-        raise ValueError(f"Could not read CI patterns file: {path}") from exc
+        raise ValueError(
+            f"Could not read CI patterns file: {path}"
+        ) from exc
     except yaml.YAMLError as exc:
-        raise ValueError("CI patterns file contains invalid YAML.") from exc
+        raise ValueError(
+            "CI patterns file contains invalid YAML."
+        ) from exc
 
-    if not isinstance(data, dict) or not isinstance(data.get("patterns"), list):
-        raise ValueError("CI patterns YAML must contain a 'patterns' list.")
+    if not isinstance(data, dict) or not isinstance(
+        data.get("patterns"), list
+    ):
+        raise ValueError(
+            "CI patterns YAML must contain a 'patterns' list."
+        )
 
-    validated = []
+    validated: list[dict[str, Any]] = []
+
     for item in data["patterns"]:
         if not isinstance(item, dict):
             raise ValueError("Each CI pattern must be a mapping.")
@@ -45,10 +54,13 @@ def _load_patterns(path: Path) -> list[dict[str, Any]]:
         regex = item.get("regex")
         confidence = item.get("confidence")
 
-        if not all(isinstance(value, str) and value for value in (
-            pattern_type, message, regex
-        )):
-            raise ValueError("Each CI pattern needs type, message, and regex.")
+        if not all(
+            isinstance(value, str) and value
+            for value in (pattern_type, message, regex)
+        ):
+            raise ValueError(
+                "Each CI pattern needs type, message, and regex."
+            )
 
         if (
             isinstance(confidence, bool)
@@ -66,12 +78,14 @@ def _load_patterns(path: Path) -> list[dict[str, Any]]:
                 f"Pattern '{pattern_type}' has an invalid regex."
             ) from exc
 
-        validated.append({
-            "type": pattern_type,
-            "message": message,
-            "confidence": float(confidence),
-            "compiled": compiled,
-        })
+        validated.append(
+            {
+                "type": pattern_type,
+                "message": message,
+                "confidence": float(confidence),
+                "compiled": compiled,
+            }
+        )
 
     return validated
 
@@ -79,8 +93,10 @@ def _load_patterns(path: Path) -> list[dict[str, Any]]:
 def _find_location(
     line: str,
 ) -> tuple[str | None, int | None]:
+    """Extract a source file and line number from a log line."""
     for pattern in LOCATION_PATTERNS:
         match = pattern.search(line)
+
         if match:
             try:
                 return match.group(1), int(match.group(2))
@@ -104,42 +120,67 @@ def parse_log(
     if len(log_text) > MAX_LOG_CHARS:
         log_text = log_text[:MAX_LOG_CHARS]
 
-    path = Path(patterns_path) if patterns_path else DEFAULT_PATTERNS_PATH
+    path = (
+        Path(patterns_path)
+        if patterns_path
+        else DEFAULT_PATTERNS_PATH
+    )
+
     patterns = _load_patterns(path)
     lines = log_text.splitlines()
+
     signals: list[FailureSignal] = []
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, str, str | None, int | None]] = set()
 
     for index, line in enumerate(lines):
         for pattern in patterns:
             match = pattern["compiled"].search(line)
+
             if not match:
                 continue
 
-            key = (pattern["type"], index)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            # Prefer a source location from the matched line, then nearby
-            # traceback context, so a traceback followed by an error can
-            # still report its source file and line.
+            # Prefer the matched line's location, then nearby traceback
+            # context when the failure line itself has no location.
             source_file, source_line = _find_location(line)
+
             if source_file is None:
-                for nearby in reversed(lines[max(0, index - 8):index]):
+                nearby_lines = lines[max(0, index - 8):index]
+
+                for nearby in reversed(nearby_lines):
                     source_file, source_line = _find_location(nearby)
+
                     if source_file is not None:
                         break
 
+            # Build the complete message before deduplication.
             message = pattern["message"]
+
             if match.lastindex:
                 detail = match.group(1)
+
                 if detail:
-                    message = f"{message} Detail: {detail.strip()}"
+                    message = (
+                        f"{message} Detail: {detail.strip()}"
+                    )
+
+            # Deduplicate repeated instances of the same failure.
+            key = (
+                pattern["type"],
+                message,
+                source_file,
+                source_line,
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
 
             start = max(0, index - 1)
             end = min(len(lines), index + 2)
-            excerpt = "\n".join(lines[start:end])[:MAX_EXCERPT_CHARS]
+            excerpt = "\n".join(lines[start:end])[
+                :MAX_EXCERPT_CHARS
+            ]
 
             signals.append(
                 FailureSignal(

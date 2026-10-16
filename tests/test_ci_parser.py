@@ -75,3 +75,41 @@ def test_log_size_is_bounded():
 
     signals = parse_log(log)
     assert signals == []
+
+def test_deduplicates_repeated_missing_module_error():
+    log = "\n".join([
+        'echo "ModuleNotFoundError: No module named '
+        "'repopilot_test_missing'\"",
+        'ModuleNotFoundError: No module named '
+        "'repopilot_test_missing'",
+        'ModuleNotFoundError: No module named '
+        "'repopilot_test_missing'",
+    ])
+
+    signals = parse_log(log)
+
+    module_signals = [
+        signal for signal in signals
+        if signal.type == "module_not_found"
+    ]
+
+    assert len(module_signals) == 1
+    assert "repopilot_test_missing" in module_signals[0].message
+
+
+def test_keeps_distinct_missing_modules():
+    log = "\n".join([
+        "ModuleNotFoundError: No module named 'requests'",
+        "ModuleNotFoundError: No module named 'yaml'",
+    ])
+
+    signals = parse_log(log)
+
+    module_signals = [
+        signal for signal in signals
+        if signal.type == "module_not_found"
+    ]
+
+    assert len(module_signals) == 2
+    assert any("requests" in s.message for s in module_signals)
+    assert any("yaml" in s.message for s in module_signals)

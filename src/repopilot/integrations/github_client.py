@@ -1,4 +1,4 @@
-
+﻿
 from __future__ import annotations
 
 import base64
@@ -6,7 +6,7 @@ import io
 import os
 import zipfile
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -70,7 +70,7 @@ class GitHubClient:
             len(parts) != 2
             or not all(parts)
             or any(part in {".", ".."} for part in parts)
-            or any(any(char.isspace() for char in part) for part in parts)
+            or any(any(char.isspace() for char in char_part) for char_part in parts)
         ):
             raise ValueError("repo must use the 'owner/repository' format.")
         return repo
@@ -88,9 +88,7 @@ class GitHubClient:
         except httpx.TimeoutException as exc:
             raise GitHubNetworkError("GitHub request timed out.") from exc
         except httpx.RequestError as exc:
-            raise GitHubNetworkError(
-                "Could not connect to GitHub."
-            ) from exc
+            raise GitHubNetworkError("Could not connect to GitHub.") from exc
 
         if response.status_code == 401:
             raise GitHubAuthError(
@@ -155,60 +153,170 @@ class GitHubClient:
         return [job for job in jobs if isinstance(job, dict)]
 
     def get_job_logs(self, repo: str, job_id: int) -> str:
-        """Download a job-log ZIP archive and return bounded text logs."""
+        """Download and return bounded plain-text or ZIP job logs."""
         repo = self._validate_repo(repo)
         self._validate_id(job_id, "job_id")
 
+        # Do not automatically follow the redirect using the authenticated
+        # GitHub API client.
         response = self._request(
-            "GET", f"/repos/{repo}/actions/jobs/{job_id}/logs"
+            "GET",
+            f"/repos/{repo}/actions/jobs/{job_id}/logs",
+            follow_redirects=False,
         )
 
-        if len(response.content) > self.MAX_LOG_ARCHIVE_BYTES:
-            raise GitHubAPIError("Job log archive exceeds the size limit.")
+        if response.status_code == 302:
+            location = response.headers.get("location")
+            if not location:
+                raise GitHubAPIError(
+                    "GitHub returned a redirect without a download URL."
+                )
 
-        try:
-            with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-                pieces: list[str] = []
-                total_bytes = 0
+            parsed = urlparse(location)
+            hostname = (parsed.hostname or "").lower()
 
-                for item in archive.infolist():
-                    if item.is_dir() or not item.filename.lower().endswith(
-                        (".txt", ".log")
-                    ):
-                        continue
+            # Only allow HTTPS Azure Blob Storage download hosts.
+            if (
+                parsed.scheme != "https"
+                or not hostname.endswith(".blob.core.windows.net")
+                or parsed.username
+                or parsed.password
+            ):
+                raise GitHubAPIError(
+                    "GitHub returned an unexpected log-download host."
+                )
 
-                    # Check declared uncompressed size before reading.
-                    total_bytes += item.file_size
-                    if total_bytes > self.MAX_EXTRACTED_LOG_BYTES:
-                        raise GitHubAPIError(
-                            "Extracted job logs exceed the size limit."
+            # Never forward the GitHub Authorization header to blob storage.
+            try:
+                with httpx.Client(
+                    timeout=30.0,
+                    follow_redirects=False,
+                    headers={"User-Agent": "RepoPilot"},
+                ) as download_client:
+                    with download_client.stream(
+                        "GET", location
+                    ) as downloaded:
+                        if not downloaded.is_success:
+                            raise GitHubAPIError(
+                                "Log download returned HTTP "
+                                f"{downloaded.status_code}."
+                            )
+
+                        content_length = downloaded.headers.get(
+                            "content-length"
                         )
+                        if content_length:
+                            try:
+                                declared_size = int(content_length)
+                            except ValueError:
+                                declared_size = 0
 
-                    with archive.open(item) as stream:
-                        content = stream.read(
-                            self.MAX_EXTRACTED_LOG_BYTES + 1
-                        )
+                            if declared_size > self.MAX_LOG_ARCHIVE_BYTES:
+                                raise GitHubAPIError(
+                                    "Job log download exceeds the size limit."
+                                )
 
-                    if len(content) > self.MAX_EXTRACTED_LOG_BYTES:
-                        raise GitHubAPIError(
-                            "An individual log file exceeds the size limit."
-                        )
+                        download_buffer = bytearray()
+                        for chunk in downloaded.iter_bytes():
+                            download_buffer.extend(chunk)
+                            if (
+                                len(download_buffer)
+                                > self.MAX_LOG_ARCHIVE_BYTES
+                            ):
+                                raise GitHubAPIError(
+                                    "Job log download exceeds the size limit."
+                                )
 
-                    pieces.append(
-                        f"===== {item.filename} =====\n"
-                        + content.decode("utf-8", errors="replace")
-                    )
+                        downloaded_bytes = bytes(download_buffer)
 
-        except zipfile.BadZipFile as exc:
+            except httpx.TimeoutException as exc:
+                raise GitHubNetworkError(
+                    "Job-log download timed out."
+                ) from exc
+            except httpx.RequestError as exc:
+                raise GitHubNetworkError(
+                    "Could not download the job logs."
+                ) from exc
+
+            content_type = downloaded.headers.get(
+                "content-type", ""
+            ).lower()
+
+        elif response.status_code == 200:
+            # Support direct responses, including existing mocked tests.
+            downloaded_bytes = response.content
+            content_type = response.headers.get(
+                "content-type", ""
+            ).lower()
+
+        else:
             raise GitHubAPIError(
-                "GitHub did not return a valid job-log ZIP archive."
-            ) from exc
-
-        combined = "\n\n".join(pieces)
-        if not combined:
-            raise GitHubAPIError(
-                "The job-log archive contained no supported text files."
+                "Unexpected HTTP status when requesting job logs: "
+                f"{response.status_code}."
             )
+
+        if len(downloaded_bytes) > self.MAX_LOG_ARCHIVE_BYTES:
+            raise GitHubAPIError(
+                "Job log download exceeds the size limit."
+            )
+
+        # GitHub's current download endpoint may return plain text directly.
+        if content_type.startswith("text/plain"):
+            combined = downloaded_bytes.decode(
+                "utf-8-sig", errors="replace"
+            )
+        else:
+            try:
+                with zipfile.ZipFile(
+                    io.BytesIO(downloaded_bytes)
+                ) as archive:
+                    pieces: list[str] = []
+                    total_bytes = 0
+
+                    for item in archive.infolist():
+                        if item.is_dir() or not item.filename.lower().endswith(
+                            (".txt", ".log")
+                        ):
+                            continue
+
+                        total_bytes += item.file_size
+                        if total_bytes > self.MAX_EXTRACTED_LOG_BYTES:
+                            raise GitHubAPIError(
+                                "Extracted job logs exceed the size limit."
+                            )
+
+                        with archive.open(item) as stream:
+                            content = stream.read(
+                                self.MAX_EXTRACTED_LOG_BYTES + 1
+                            )
+
+                        if len(content) > self.MAX_EXTRACTED_LOG_BYTES:
+                            raise GitHubAPIError(
+                                "An individual log file exceeds the size limit."
+                            )
+
+                        pieces.append(
+                            f"===== {item.filename} =====\n"
+                            + content.decode(
+                                "utf-8-sig", errors="replace"
+                            )
+                        )
+
+            except zipfile.BadZipFile as exc:
+                raise GitHubAPIError(
+                    "GitHub returned neither plain-text logs "
+                    "nor a valid ZIP archive."
+                ) from exc
+
+            combined = "\n\n".join(pieces)
+
+            if not combined:
+                raise GitHubAPIError(
+                    "The job-log archive contained no supported text files."
+                )
+
+        if not combined.strip():
+            raise GitHubAPIError("The downloaded job logs are empty.")
 
         if len(combined) > self.MAX_LOG_CHARS:
             combined = combined[: self.MAX_LOG_CHARS] + (
@@ -221,7 +329,9 @@ class GitHubClient:
         repo = self._validate_repo(repo)
 
         if not path or path.startswith("/") or "\x00" in path:
-            raise ValueError("path must be a non-empty repository-relative path.")
+            raise ValueError(
+                "path must be a non-empty repository-relative path."
+            )
 
         encoded_path = quote(path, safe="/")
         response = self._request(
@@ -260,3 +370,4 @@ class GitHubClient:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
