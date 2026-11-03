@@ -1,4 +1,3 @@
-
 import json
 import re
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ BLOCKED_NAMES = {
     "credentials",
     "secrets",
 }
+
 BLOCKED_DIRS = {
     ".git",
     ".ssh",
@@ -26,7 +26,12 @@ BLOCKED_DIRS = {
     "node_modules",
     "__pycache__",
 }
+
 BLOCKED_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
+
+HUNK_HEADER_RE = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
+)
 
 
 @dataclass(frozen=True)
@@ -46,7 +51,8 @@ class ProposalValidationError(ValueError):
 
 def _validate_path(path: str) -> str:
     """Validate a repository-relative POSIX path."""
-    if not path or "\\" in path or "\x00" in path:
+
+    if not isinstance(path, str) or not path or "\\" in path or "\x00" in path:
         raise ProposalValidationError("Invalid patch file path.")
 
     candidate = PurePosixPath(path)
@@ -84,11 +90,13 @@ def validate_diff(
     diff: str,
     allowed_files: set[str],
 ) -> tuple[str, ...]:
-    """Validate diff structure and restrict it to supplied source files.
-
-    This checks proposal boundaries, not whether a patch is correct,
-    applicable, or safe to execute.
     """
+    Validate unified-diff structure and restrict changed files.
+
+    This checks proposal boundaries and hunk consistency. It does not
+    establish whether a patch applies to the actual repository.
+    """
+
     if not isinstance(diff, str) or not diff.strip():
         raise ProposalValidationError("The proposed diff is empty.")
 
@@ -101,63 +109,164 @@ def validate_diff(
         )
 
     allowed = {_validate_path(path) for path in allowed_files}
+    lines = diff.splitlines()
+
     changed_files: list[str] = []
-    old_path: str | None = None
-    new_path: str | None = None
-    has_hunk = False
+    index = 0
 
-    for line in diff.splitlines():
-        if line.startswith("--- "):
-            raw = line[4:].split("\t", 1)[0].strip()
-            if raw == "/dev/null":
-                raise ProposalValidationError(
-                    "New or deleted files are not supported yet."
-                )
-            if not raw.startswith("a/"):
-                raise ProposalValidationError(
-                    "Expected an 'a/' source path in diff header."
-                )
-            old_path = _validate_path(raw[2:])
+    while index < len(lines):
 
-        elif line.startswith("+++ "):
-            raw = line[4:].split("\t", 1)[0].strip()
-            if raw == "/dev/null":
-                raise ProposalValidationError(
-                    "New or deleted files are not supported yet."
-                )
-            if not raw.startswith("b/"):
-                raise ProposalValidationError(
-                    "Expected a 'b/' destination path in diff header."
-                )
-            new_path = _validate_path(raw[2:])
+        # Each file section must begin with an old-file header.
+        if not lines[index].startswith("--- "):
+            raise ProposalValidationError(
+                "Expected an old-file header starting with '--- '."
+            )
 
-            if old_path is None or old_path != new_path:
+        old_raw = lines[index][4:].split("\t", 1)[0].strip()
+        index += 1
+
+        if old_raw == "/dev/null":
+            raise ProposalValidationError(
+                "New or deleted files are not supported yet."
+            )
+
+        if not old_raw.startswith("a/"):
+            raise ProposalValidationError(
+                "Expected an 'a/' source path in diff header."
+            )
+
+        old_path = _validate_path(old_raw[2:])
+
+        # Validate destination header.
+        if index >= len(lines) or not lines[index].startswith("+++ "):
+            raise ProposalValidationError(
+                "Expected a destination header starting with '+++ '."
+            )
+
+        new_raw = lines[index][4:].split("\t", 1)[0].strip()
+        index += 1
+
+        if new_raw == "/dev/null":
+            raise ProposalValidationError(
+                "New or deleted files are not supported yet."
+            )
+
+        if not new_raw.startswith("b/"):
+            raise ProposalValidationError(
+                "Expected a 'b/' destination path in diff header."
+            )
+
+        new_path = _validate_path(new_raw[2:])
+
+        if old_path != new_path:
+            raise ProposalValidationError(
+                "Only in-place modifications are supported."
+            )
+
+        if new_path not in allowed:
+            raise ProposalValidationError(
+                f"Patch changes a file not supplied as evidence: {new_path}"
+            )
+
+        if new_path in changed_files:
+            raise ProposalValidationError(
+                "Duplicate file sections are not supported."
+            )
+
+        changed_files.append(new_path)
+
+        hunk_count = 0
+
+        # Parse all hunks belonging to this file.
+        while index < len(lines) and lines[index].startswith("@@"):
+
+            match = HUNK_HEADER_RE.fullmatch(lines[index])
+
+            if not match:
                 raise ProposalValidationError(
-                    "Only in-place modifications to existing paths are supported."
+                    "Malformed unified-diff hunk header."
                 )
 
-            if new_path not in allowed:
+            old_expected = int(match.group(2) or "1")
+            new_expected = int(match.group(4) or "1")
+
+            index += 1
+
+            old_actual = 0
+            new_actual = 0
+            has_change = False
+
+            # Consume exactly the number of lines declared by the header.
+            while (
+                old_actual < old_expected
+                or new_actual < new_expected
+            ):
+                if index >= len(lines):
+                    raise ProposalValidationError(
+                        "Diff hunk line counts do not match the hunk header."
+                    )
+
+                line = lines[index]
+
+                if line == r"\ No newline at end of file":
+                    index += 1
+                    continue
+
+                if line.startswith(" "):
+                    old_actual += 1
+                    new_actual += 1
+
+                elif line.startswith("-"):
+                    old_actual += 1
+                    has_change = True
+
+                elif line.startswith("+"):
+                    new_actual += 1
+                    has_change = True
+
+                else:
+                    raise ProposalValidationError(
+                        "Invalid unified-diff hunk content."
+                    )
+
+                if (
+                    old_actual > old_expected
+                    or new_actual > new_expected
+                ):
+                    raise ProposalValidationError(
+                        "Diff hunk line counts do not match the hunk header."
+                    )
+
+                index += 1
+
+            # The no-newline marker can also follow the final hunk line.
+            while (
+                index < len(lines)
+                and lines[index] == r"\ No newline at end of file"
+            ):
+                index += 1
+
+            if not has_change:
                 raise ProposalValidationError(
-                    f"Patch changes a file not supplied as evidence: {new_path}"
+                    "Diff hunk must contain at least one addition or deletion."
                 )
 
-            changed_files.append(new_path)
+            hunk_count += 1
 
-        elif line.startswith("@@ "):
-            if old_path is None or new_path is None:
-                raise ProposalValidationError(
-                    "Diff hunk appeared before file headers."
-                )
-            has_hunk = True
+        if hunk_count == 0:
+            raise ProposalValidationError(
+                "Each changed file must contain at least one valid hunk."
+            )
 
-    if not changed_files or not has_hunk:
+        # The next line must begin another file section or the diff is invalid.
+        if index < len(lines) and not lines[index].startswith("--- "):
+            raise ProposalValidationError(
+                "Unexpected content outside a unified-diff hunk."
+            )
+
+    if not changed_files:
         raise ProposalValidationError(
-            "The response does not contain a valid file change and hunk."
-        )
-
-    if len(set(changed_files)) != len(changed_files):
-        raise ProposalValidationError(
-            "Duplicate file sections are not supported."
+            "The response does not contain a valid file change."
         )
 
     return tuple(changed_files)
@@ -169,7 +278,8 @@ def generate_patch_proposal(
     source_files: dict[str, str],
 ) -> PatchProposal:
     """Ask the configured provider for a validated, review-only patch."""
-    if not failure_evidence.strip():
+
+    if not isinstance(failure_evidence, str) or not failure_evidence.strip():
         raise ValueError("Failure evidence cannot be empty.")
 
     if not source_files:
@@ -184,7 +294,9 @@ def generate_patch_proposal(
         safe_path = _validate_path(path)
 
         if not isinstance(content, str):
-            raise ValueError(f"Source content for {safe_path} must be text.")
+            raise ValueError(
+                f"Source content for {safe_path} must be text."
+            )
 
         if len(content) > MAX_EVIDENCE_CHARS:
             raise ValueError(f"Source file is too large: {safe_path}")
@@ -222,17 +334,20 @@ def generate_patch_proposal(
     ]
 
     response = provider.chat(messages)
+
     if not isinstance(response, str):
         raise ProposalValidationError(
             "Provider response must be a JSON object."
         )
 
     response_text = response.strip()
+
     fenced = re.fullmatch(
-        r"```json[ \t]*\r?\n(.*?)\r?\n?```",
+        r"```json\s*(.*?)\s*```",
         response_text,
         flags=re.IGNORECASE | re.DOTALL,
     )
+
     if fenced:
         response_text = fenced.group(1).strip()
 
@@ -249,23 +364,25 @@ def generate_patch_proposal(
         )
 
     required_fields = {"summary", "rationale", "diff", "risks"}
+
     if not required_fields.issubset(data):
         raise ProposalValidationError(
             "Response is missing required proposal fields."
         )
 
     for field_name in required_fields:
-        if not isinstance(data[field_name], str) or not data[field_name].strip():
+        if (
+            not isinstance(data[field_name], str)
+            or not data[field_name].strip()
+        ):
             raise ProposalValidationError(
                 f"Proposal field '{field_name}' must be a non-empty string."
             )
 
-    if re.search(r"```", data["diff"]):
-        raise ProposalValidationError(
-            "The diff must not contain Markdown code fences."
-        )
-
-    changed_files = validate_diff(data["diff"], set(safe_sources))
+    changed_files = validate_diff(
+        data["diff"],
+        set(safe_sources),
+    )
 
     return PatchProposal(
         summary=data["summary"].strip(),

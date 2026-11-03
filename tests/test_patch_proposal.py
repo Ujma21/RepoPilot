@@ -158,3 +158,81 @@ def test_proposal_generation_does_not_modify_source_file(tmp_path):
     )
 
     assert source.read_text(encoding="utf-8") == original
+
+
+def test_malformed_hunk_header_is_rejected():
+    diff = (
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ invalid hunk @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with pytest.raises(ProposalValidationError, match="Malformed"):
+        validate_diff(diff, {"src/app.py"})
+
+
+def test_incorrect_hunk_line_counts_are_rejected():
+    diff = (
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with pytest.raises(ProposalValidationError, match="line counts"):
+        validate_diff(diff, {"src/app.py"})
+
+
+def test_missing_destination_header_is_rejected():
+    diff = (
+        "--- a/src/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with pytest.raises(ProposalValidationError):
+        validate_diff(diff, {"src/app.py"})
+
+
+def test_mismatched_file_headers_are_rejected():
+    diff = (
+        "--- a/src/app.py\n"
+        "+++ b/src/other.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with pytest.raises(ProposalValidationError, match="in-place"):
+        validate_diff(diff, {"src/app.py", "src/other.py"})
+
+
+def test_duplicate_file_sections_are_rejected():
+    section = (
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with pytest.raises(ProposalValidationError, match="Duplicate"):
+        validate_diff(section + section, {"src/app.py"})
+
+
+def test_valid_context_lines_are_accepted():
+    diff = (
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " first\n"
+        "-old\n"
+        "+new\n"
+        " last\n"
+    )
+
+    assert validate_diff(diff, {"src/app.py"}) == ("src/app.py",)
